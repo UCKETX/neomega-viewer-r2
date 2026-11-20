@@ -1,4 +1,5 @@
 // 生成 Go 要嵌入的播放组件。模块和 worker 分别打包，导出的 HTML 在 file:// 下也能启动。
+import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -9,6 +10,8 @@ import { defaultAssets } from "../../../../../neomega-r2/r2/scripts/default-asse
 const here = dirname(fileURLToPath(import.meta.url));
 const core = fileURLToPath(new URL("../../../../../neomega-r2/r2/", import.meta.url));
 const dist = join(core, "dist");
+// Install this Viewer shader overlay before embedding shader resources.
+execFileSync(process.execPath, [fileURLToPath(new URL("../../../web/scmod/build.mjs", import.meta.url)), core], { stdio: "inherit" });
 const { build } = createRequire(join(core, "package.json"))("esbuild");
 async function bundle(entry, format = "esm") {
   const result = await build({

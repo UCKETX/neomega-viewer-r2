@@ -88,6 +88,12 @@
             </button>
         </template>
         <template id="settings-extra">
+            <h3>曙光实验</h3>
+            <div class="button-row">
+                <button id="dawnlight-apply" class="button" type="button">应用曙光光影</button>
+                <button id="dawnlight-restore" class="button" type="button" disabled>还原原画面</button>
+            </div>
+            <p class="hint">暖色侧光、受建筑遮挡的体积薄雾、分层云和水面反射。保留原版贴图，太阳随时间滑条移动。</p>
             <h3>材质包</h3>
             <input
                 id="texture-path"
@@ -100,7 +106,7 @@
                 ><button id="texture-reset" class="button">恢复原版</button
                 ><button id="texture-apply" class="button primary">应用</button>
             </div>
-            <label class="setting"
+            <label id="texture-size-row" class="setting"
                 >贴图尺寸上限<select id="texture-size">
                     <option value="16">16</option>
                     <option value="32">32</option>
@@ -110,6 +116,7 @@
                     <option value="512">512</option>
                 </select></label
             >
+            <p id="texture-sc-hint" class="hint" hidden>只接受生存战争 .scbtex 或 PNG 方块图集，不使用 Minecraft 材质。恢复默认优先使用存档内置图集。</p>
             <p id="texture-status" class="hint">
                 原版 · 支持 labPBR 法线与高光贴图
             </p>
@@ -362,6 +369,7 @@
         <section id="info" class="popover panel" popover>
             <h2 id="info-name">场景信息</h2>
             <p id="info-path"></p>
+            <p id="info-scmods" class="hint" hidden></p>
             <label id="world-dimension-row" class="setting" hidden
                 >维度<select id="world-dimension"></select
             ></label>
@@ -462,6 +470,11 @@
                     <div class="setting structure-root">转换输出目录<output id="structure-root"></output><button type="button" id="reset-structure-root" class="button">重置为源文件旁</button></div>
                     <p class="hint">不同来源的同名结构会直接打开已有转换结果，不覆盖。并发填 0 自动选择。</p>
                 </details>
+                <label id="scmod-row" class="field" hidden>
+                    生存战争模组（.scmod，每行一个本机路径）
+                    <textarea id="scmod-paths" rows="2" placeholder="点击列表里的 .scmod 添加，或粘贴完整路径"></textarea>
+                    <small>只导入已绑定的静态方块、贴图和模型；不运行模组代码。</small>
+                </label>
                 <p id="source-hint" class="hint"></p>
             </div>
             <footer class="dialog-footer">

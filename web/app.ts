@@ -7,6 +7,7 @@ import { createView, TIER_NAMES, type ViewSettings, type ViewStats } from "/r2/c
 import { element, closePopovers } from "/r2/common_ui/hud.js";
 import { showWorldInfo, showConnection, showWorldDetails } from "./world-info.js";
 import { createPicker } from "./picker.js";
+import { bindDawnlight } from "./dawnlight.js";
 import { startupStage } from "/r2/common_ui/startup.js";
 
 // Electron embeds this page at r2://app. The GLSL inspection tools explicitly request WebGL.
@@ -59,6 +60,31 @@ let world: ViewerWorld = { loaded: false, id: -1, name: "", position: camera.pos
 let continuous = false;
 /** 所有世界都经 R2Link 读取：本机存档与内置场景连接同源的 /r2link，外部数据源连接用户给的地址。
  * 内置场景额外提供开场取景与时间；外部数据源带 connection 与握手给出的相机。 */
+// R2 v0.1.4 keeps its hash table and geometry references fixed for a
+// renderer's lifetime. Cross-atlas transitions reload the page so both
+// backends start with a matched states/catalog/geometry/texture bundle.
+const materialKey = (info: ViewerWorld) => info.textureName ? `scworld/${info.id}` : "minecraft";
+const reconnectKey = "neomega-r2-reconnect-once";
+const scViewKey = "neomega-r2-sc-texture-view-once";
+interface RetainedView {
+  id: number;
+  path?: string;
+  position: number[];
+  yaw: number;
+  pitch: number;
+  time: number;
+}
+function takeSCView(info: ViewerWorld): RetainedView | undefined {
+  try {
+    const item = sessionStorage.getItem(scViewKey);
+    sessionStorage.removeItem(scViewKey);
+    if (!item || info.kind !== "scworld") return;
+    const v: RetainedView = JSON.parse(item);
+    if (v.id === info.id && v.path === info.path && v.position.length === 3 &&
+        [...v.position, v.yaw, v.pitch, v.time].every(Number.isFinite)) return v;
+  } catch {}
+}
+const textureControls = ["texture-browse", "texture-apply", "texture-reset", "texture-size", "texture-path"];
 let worldQueue = Promise.resolve();
 /** 打开、关闭、连接与启动共用切换队列；编号不比当前世界新的切换被忽略。 */
 function useWorld(info: ViewerWorld, linked?: R2LinkSource) {
@@ -91,6 +117,20 @@ async function followServer(closed: R2LinkSource, message: string) {
 async function installWorld(info: ViewerWorld, linked?: R2LinkSource) {
   if (world.id === info.id) { world = info; return; }
   if (world.id > info.id) return linked?.close();
+  if (materialKey(info) !== materialKey(initialWorld)) {
+    if (info.connection) sessionStorage.setItem(reconnectKey, info.connection.url);
+    if (info.scTextureUpdate && info.kind === "scworld" && world.kind === "scworld" && info.path === world.path) {
+      const retained: RetainedView = { id: info.id, path: info.path, ...camera, time: settings.time };
+      try { sessionStorage.setItem(scViewKey, JSON.stringify(retained)); } catch {}
+    }
+    linked?.close();
+    // Cancel dependent rendering without trying to feed a hash table the
+    // previous renderer cannot decode.
+    exporting?.abort(new Error("场景已切换"));
+    session?.dispose();
+    location.reload();
+    return;
+  }
   exporting?.abort(new Error("场景已切换"));
   await view.cancelPhoto();
   // 离开开场场景或直接载入外部来源时从白天开始；来源之间切换保留当前时间。
@@ -102,6 +142,7 @@ async function installWorld(info: ViewerWorld, linked?: R2LinkSource) {
   closePopovers();
   showWorldInfo(info);
   showConnection(info.connection);
+  syncTextureControls(info);
   const current = (source = linked || localSource(info));
   view.setWorld(info.loaded, async () => {
     await current.welcome;
@@ -109,12 +150,13 @@ async function installWorld(info: ViewerWorld, linked?: R2LinkSource) {
   }).catch((error) => {
     if (source === current && current.state === "connected") hud.error(String(error));
   });
-  const start = info.scene?.camera || info.camera;
+  const retained = takeSCView(info);
+  const start = retained ?? info.scene?.camera ?? info.camera;
   camera.position = [...(start?.position || info.position)];
   camera.yaw = start?.yaw ?? -0.7;
   camera.pitch = start?.pitch ?? -0.32;
-  if (info.scene || startDaytime) {
-    settings.time = info.scene?.time ?? 10;
+  if (retained || info.scene || startDaytime) {
+    settings.time = retained?.time ?? info.scene?.time ?? 10;
     hud.settings();
   }
   session = new WorldSession(renderer, current, {
@@ -152,8 +194,29 @@ async function openWorld(path: string, options: OpenOptions = {}, progress?: (va
 }
 const showCompile: NonNullable<RendererOptions["onProgress"]> = ({ index, total, label }) =>
   startupStage(`${label}（${index}/${total}）`);
+await startupStage("正在读取场景信息…");
+const initialResponse = await fetch("/api/world", { cache: "no-store" });
+if (!initialResponse.ok) throw Error(await initialResponse.text());
+const initialWorld: ViewerWorld = await initialResponse.json();
+if (initialWorld.textureName) {
+  const response = await fetch(`/api/world/textures?world=${initialWorld.id}`);
+  if (!response.ok || !response.body) throw Error(await response.text());
+  activeTextures = await readTextureStream(response.body);
+}
+const initialFiles = activeTextures?.files;
 await startupStage("正在初始化图形设备…");
-renderer = await createRenderer(canvas, { useWebGPU, tier: settings.tier, onProgress: showCompile });
+renderer = await createRenderer(canvas, {
+  useWebGPU, tier: settings.tier, onProgress: showCompile,
+  ...(initialFiles && { readResource: async (name: string) => {
+    const data = initialFiles.get(name);
+    if (data) return new Response(data);
+    if (/\.(?:frag|wgsl)$/.test(name)) {
+      const response = await fetch("/r2/render/" + name);
+      if (response.ok) return response;
+    }
+    throw Error("生存战争渲染资源缺失：" + name);
+  } }),
+});
 await startupStage("正在准备场景…");
 const view = createView({
   switchBackend: location.protocol !== "r2:",
@@ -163,6 +226,8 @@ const view = createView({
   onStats: showDetails,
 });
 const { hud, map, frames } = view;
+bindDawnlight(settings, element<HTMLButtonElement>("dawnlight-apply"),
+  element<HTMLButtonElement>("dawnlight-restore"), element<HTMLInputElement>("airOpacity"));
 exportButton.onclick = async () => {
   if (!source || exporting) return;
   exporting = new AbortController();
@@ -298,15 +363,43 @@ async function loadTextures(path: string, maxSize: number) {
   if (!response.body) throw Error("服务端未返回材质数据");
   return readTextureStream(response.body);
 }
+function syncTextureControls(info: ViewerWorld) {
+  const sc = info.kind === "scworld";
+  element("texture-size-row").hidden = sc;
+  element("texture-sc-hint").hidden = !sc;
+  element<HTMLSelectElement>("texture-size").disabled = sc;
+  element<HTMLButtonElement>("texture-reset").textContent = sc ? "恢复默认" : "恢复原版";
+  const input = element<HTMLInputElement>("texture-path");
+  input.value = sc ? info.scTexturePath ?? "" : settings.texturePath;
+  input.placeholder = sc ? ".scbtex 或 PNG 方块图集路径" : "原版，或输入 zip / 目录路径";
+  if (sc) element("texture-status").textContent = info.textureName ?? "生存战争材质";
+}
+
+async function applySCTexture(path: string, signal?: AbortSignal) {
+  const current = world;
+  for (const id of textureControls) element<HTMLInputElement>(id).disabled = true;
+  element("texture-status").textContent = "正在读取生存战争图集…";
+  try {
+    const response = await fetch("/api/world/sc-texture", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ world: current.id, path }),
+      signal,
+    });
+    if (!response.ok) throw Error((await response.text()).trim());
+    await useWorld(await response.json());
+  } catch (error) {
+    if (world === current) element("texture-status").textContent = signal?.aborted ? (current.textureName ?? "") : String(error);
+    throw error;
+  } finally {
+    for (const id of textureControls) element<HTMLInputElement>(id).disabled = id === "texture-size" && world.kind === "scworld";
+  }
+}
+
 /** 旧场景持续显示，贴图和透明度目录准备好后一起切换。 */
-async function applyTextures(path: string) {
-  const buttons = [
-    "texture-browse",
-    "texture-apply",
-    "texture-reset",
-    "texture-size",
-  ];
-  for (const id of buttons) element<HTMLButtonElement | HTMLSelectElement>(id).disabled = true;
+async function applyTextures(path: string, signal?: AbortSignal) {
+  if (world.kind === "scworld") return applySCTexture(path, signal);
+  const buttons = textureControls;
+  for (const id of buttons) element<HTMLButtonElement | HTMLSelectElement | HTMLInputElement>(id).disabled = true;
   element("texture-status").textContent = "正在合成贴图与透明度数据…";
   const maxSize = Number(element<HTMLSelectElement>("texture-size").value);
   try {
@@ -324,13 +417,17 @@ async function applyTextures(path: string) {
     element("texture-status").textContent = String(error);
     throw error;
   } finally {
-    for (const id of buttons) element<HTMLButtonElement | HTMLSelectElement>(id).disabled = false;
+    for (const id of buttons) element<HTMLButtonElement | HTMLSelectElement | HTMLInputElement>(id).disabled = false;
   }
 }
 element<HTMLInputElement>("texture-path").value = settings.texturePath;
 element<HTMLSelectElement>("texture-size").value = String(settings.textureSize);
 element<HTMLButtonElement>("texture-browse").onclick = () =>
-  picker({ kind: "pack", choose: applyTextures });
+  picker({
+    kind: world.kind === "scworld" ? "sc-texture" : "pack",
+    choose: (path, _options, _progress, signal) => applyTextures(path, signal),
+    ...(world.kind === "scworld" && { world: { path: world.scTexturePath || world.path } }),
+  });
 element<HTMLButtonElement>("texture-apply").onclick = () =>
   applyTextures(element<HTMLInputElement>("texture-path").value).catch((error) =>
     hud.error(String(error)),
@@ -350,7 +447,8 @@ function showDetails({ stats, shownTier, median, width, height }: ViewStats) {
   element("height-diagnostics").hidden = clipped === 0;
   element("height-diagnostics").textContent = `有 ${clipped} 个子区块（subchunk）超出可显示高度（Y -64～447，按已收到的 r2region 统计）`;
   showWorldDetails([
-    ["来源", world.kind || "内置场景"],
+    ["来源", world.kind === "scworld" ? "生存战争" : world.kind || "内置场景"],
+    ...(world.textureName ? [["方块材质", world.textureName]] as const : []),
     ["预览渲染器", TIER_NAMES[shownTier]],
     ...(world.reusedStructure ? [["结构输出", "复用已有存档"]] as const : []),
     ["近景半径", `${settings.nearRadius} 区块（chunk）`],
@@ -377,7 +475,7 @@ function frame(now: number) {
   view.frame(now, session, { continuous });
 }
 
-if (settings.texturePath || settings.textureSize !== 128) {
+if (!initialWorld.textureName && (settings.texturePath || settings.textureSize !== 128)) {
   await startupStage("正在加载自定义材质…");
   await applyTextures(settings.texturePath).catch((error) =>
     hud.error(String(error)),
@@ -388,7 +486,12 @@ await startupStage("正在读取场景信息…");
 const localServiceURL = location.protocol === "r2:"
   ? await (await fetch("/desktop/service-url")).json()
   : location.href;
-await useWorld(await (await fetch("/api/world")).json());
+await useWorld(initialWorld);
+const reconnect = sessionStorage.getItem(reconnectKey);
+if (reconnect && !initialWorld.textureName) {
+  sessionStorage.removeItem(reconnectKey);
+  await connectSource(reconnect).catch(error => hud.error(String(error)));
+}
 await startupStage("正在加载场景，准备第一帧…");
 window.addEventListener("pagehide", () => {
   view.dispose();

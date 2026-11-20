@@ -98,6 +98,28 @@ Java 维度使用存档内的相对目录，包括主世界 `.`、下界 `DIM-1`
 
 区块占用表经 R2Link 的 `chunks` 请求取得，编码见 [占用表](https://github.com/CMA2401PT/neomega-r2/blob/main/go-link/README.md#占用表)。每个世界请求一次，外部数据源更新世界描述时重新请求；服务端对每个存档会话只扫描一次区域文件。Java 存档按覆盖 32×32 区块的 `.mca` 文件建立索引，Möbius 按同样的粒度登记环所在的区块；它们都与流式加载的 8×8 区块区域采用不同粒度。网页把每条记录变成 32×32 的离屏位图。可见范围内的区域位图先在同一张离屏画布中按区块坐标拼接，再整体按地图相机缩放旋转。采样使用最近邻，区域交界处不会因分别绘制的边缘抗锯齿而留下浅色接缝。
 
+## 曙光实验（Dawnlight 风格）
+
+在「设置 → 画面」点击「应用曙光光影」，或点击「还原原画面」恢复此前的光照和渲染档。这个实验受 [Dawnlight](https://dawnlight.eltancex.top/) 的体积光、大气与水面效果启发，**不是原光影包加载器**，没有使用其代码或资源。它给 R2 光影档加了以地形阴影求交为基础的分层体积散射，以及可在水面反射中看到的程序云层；水面仍由 R2 本身计算反射和波纹。应用曙光后太阳跟随时间滑条；如果需要固定构图，可以手动放置太阳。静止累积、拍照和离线 HTML 保留这套参数。近地雾有额外的 GPU 开销，可以减小渲染分辨率，或在光照页关闭太阳辉光。火把体积发光、泛光、动态天气与原包的完整效果尚未移植。
+
+## 生存战争地图
+
+文件选择器和 `-world` 支持只读打开 Survivalcraft 2.4 区域格式（RGN1）的 `.scworld`。只显示存档里的区块，不生成新地形。打开时使用地图内置的 PNG `.scbtex`；没有内置贴图时使用 [生存战争 2.4 官方方块图集](https://kaalus.wordpress.com/media/)（首次下载、校验后缓存）。可用 `-survivalcraft-texture /path/to/Blocks.png` 指定本地图集。生存战争不套用 Minecraft 材质；换到不同方块图集时，页面会重载渲染器，切换 WebGPU／WebGL 2 时继续使用同一套生存战争贴图。
+
+网页「设置 → 画面 → 材质包」可以选择、应用生存战争 `.scbtex` 或 PNG 方块图集。换图集保留当前世界、已导入模组和视角；「恢复默认」优先使用存档内置图集，否则使用 2.4 原版。PNG 图集必须是 128、256、512 或 1024 像素的正方形，非 PNG 格式不支持。该功能不读取 Minecraft 材质包，也不会自动给未知模组方块补定义。
+
+RGN1 存档的世界信息支持 `Project.xml` 和使用 `[类型, 值]` 字段的 `Project.json`；两者同时存在时优先用 XML，不会使用 `Project.bak` 或 `Project.temp`。地形格式以 ZIP 内的区域文件为准，不以世界信息中的版本号（例如 `2.3`）决定。
+
+网页和命令行都可导出带生存战争贴图的离线 HTML，例如：
+
+```sh
+./dist/neOmega-R2 export -o palace.html '/path/to/palace.scworld'
+```
+
+家具、楼梯和栏杆造型仍有近似；旧式单文件地形、ASTC 材质、实体、标牌文字及模组逻辑不支持。生存战争的材质随本机 Viewer 会话或 HTML 提供，通用外部 R2Link 客户端仅有 Minecraft 状态表时无法直接显示这些方块。
+
+原版可放置方块均有静态预览映射。电路接线、门、活塞、部分植物和家具的外形为近似；不执行电路或动画。未适配的模组方块仍显示亮紫色占位，便于分辨存档中的内容和渲染缺口。
+
 ## 使用材质包
 
 在“设置”里选择服务端机器上的材质包 zip 或目录，也可以输入完整路径后点击“应用”。Java 包根目录应直接包含 `assets`。基岩包从 `textures/blocks` 读取名字能对应的方块 PNG、高度图和材质参数。切换只改变共享静态模型使用的贴图，保留当前存档与视角；缺失或损坏的单张图片回退原版。“恢复原版”清除覆盖，路径和尺寸设置保存在当前浏览器。
@@ -222,3 +244,31 @@ make build
 依赖升级时，`make update-deps` 会读取各远端默认分支的最新提交，重新生成锁文件。在干净工作区用 `make deps` 验证新依赖能构建后，再提交锁文件。
 
 `make release` 将当前 tag 写入可执行文件，并把四个平台的压缩包放在 `dist/release/`。可以用 `make release VERSION=v0.1.1` 指定打包版本。推送 tag 后，[发布工作流](.github/workflows/release.yml)会使用同一个目标打包。
+
+## 生存战争 .scmod 静态预览
+
+在文件选择器中选中 `.scworld`，再点击列表内的 `.scmod`（也可在模组栏里逐行粘贴 Viewer 所在机器的文件路径），最后点击「打开所选来源」。再次打开存档时可清空模组栏。启动和离线导出使用同一个读入机制：
+
+```sh
+./dist/neOmega-R2 -world '/path/world.scworld' -survivalcraft-mod '/path/pack.scmod'
+./dist/neOmega-R2 export -survivalcraft-mod '/path/pack.scmod' -o preview.html '/path/world.scworld'
+```
+
+`.scmod` 按 ZIP 只读打开，需要 `modinfo.json`。带 `Class Name` 列的分号分隔方块 CSV 可以通过存档的方块注册表匹配类名；也可以在 CSV 用 `BlockIndex` 明确绑定 ID。CSV 可用 `DefaultTextureSlot` 指向存档图集的格子，或用 `Texture` 和 `Model` 声明 PNG、OBJ/DAE 的 ZIP 内路径。也会查找 `Assets/Textures/<类名>.png` 和 `Assets/Models/<类名>.obj/.dae`（可省略类名末尾的 Block）。如果存档未提供注册表或资源文件名不一致，可以在模组 ZIP 根目录添加 `r2-blocks.json`，以实际注册表核对的 ID 或类名明确绑定；不要猜测别的存档里分配的数字：
+
+```json
+{
+  "version": 1,
+  "blocks": [
+    {
+      "id": 901,
+      "class": "DemoTriangleBlock",
+      "model": "Assets/Models/DemoTriangle.obj",
+      "texture": "Assets/Textures/DemoTriangle.png"
+    },
+    { "id": 902, "atlasSlot": 78 }
+  ]
+}
+```
+
+未指定模型时预览为有贴图的整方块。支持一个纹理的静态 OBJ（带 UV）以及 COLLADA 的 `triangles`、`polylist`（带 UV），使用单格坐标；模型超出单格时默认等比缩放居中落地，也可以用 `scale` 和 `offset: [x,y,z]` 显式指定。暂不读取场景节点变换、骨骼、动画、多个材质及代码生成的模型；DLL 和脚本不会执行。无法确认绑定的方块仍是紫色诊断占位。

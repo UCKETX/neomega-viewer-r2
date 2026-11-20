@@ -61,3 +61,50 @@ func TestSourceKindsAndSelectedFile(t *testing.T) {
 		}
 	}
 }
+
+func TestSurvivalcraftSource(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "故宫.SCWORLD")
+	if err := os.WriteFile(path, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	files, err := List(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if files.Kind != "scworld" || files.Selected != path || len(files.Entries) != 1 || !files.Entries[0].Openable {
+		t.Fatalf("unexpected listing: %+v", files)
+	}
+}
+
+func TestSurvivalcraftTexturePicker(t *testing.T) {
+	root := t.TempDir()
+	for _, file := range []string{"地图.scworld", "mod.scmod", "方块.SCBTEX", "图集.png", "MC.zip"} {
+		if err := os.WriteFile(filepath.Join(root, file), nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Mkdir(filepath.Join(root, "folder"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(root, "方块.SCBTEX")
+	files, err := ListSCTextures(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if files.Kind != "sc-texture" || files.Selected != want || len(files.Entries) != 3 {
+		t.Fatal(files)
+	}
+	for _, entry := range files.Entries {
+		if entry.Directory {
+			if entry.Openable || entry.Kind != "folder" {
+				t.Fatal(entry)
+			}
+		} else if !entry.Openable || entry.Kind != "sc-texture" {
+			t.Fatal(entry)
+		}
+	}
+	mc, err := ListSCTextures(filepath.Join(root, "MC.zip"))
+	if err != nil || mc.Selected != "" {
+		t.Fatal(mc, err)
+	}
+}

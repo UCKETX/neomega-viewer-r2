@@ -40,6 +40,12 @@ type Info struct {
 	StructureMemoryMiB int           `json:"structureMemoryMiB"`
 	StructureWorkers   int           `json:"structureWorkers"`
 	StructureRoot      string        `json:"structureRoot,omitempty"`
+	TextureName        string        `json:"textureName,omitempty"`
+	SCTexturePath      string        `json:"scTexturePath,omitempty"`
+	SCTextureUpdate    bool          `json:"scTextureUpdate,omitempty"`
+	SCModPaths         []string      `json:"survivalcraftMods,omitempty"`
+	SCModNames         []string      `json:"scModNames,omitempty"`
+	SCModBlocks        int           `json:"scModBlocks,omitempty"`
 }
 
 // OpenOptions 让网页只覆盖用户填写的选项，其余使用服务启动时的默认值。
@@ -50,6 +56,7 @@ type OpenOptions struct {
 	StructureMemoryMiB int                      `json:"structureMemoryMiB"`
 	StructureWorkers   *int                     `json:"structureWorkers"`
 	StructureRoot      string                   `json:"structureRoot"`
+	SurvivalcraftMods  []string                 `json:"survivalcraftMods"`
 	Progress           func(structure.Progress) `json:"-"`
 }
 
@@ -126,6 +133,9 @@ func (s *Server) Open(ctx context.Context, request OpenOptions) (Info, error) {
 	options.Path = request.Path
 	options.Dimension = request.Dimension
 	options.StructureRoot = request.StructureRoot
+	if request.SurvivalcraftMods != nil {
+		options.SurvivalcraftMods = request.SurvivalcraftMods
+	}
 	options.Structure.Progress = request.Progress
 	if request.BedrockFix != nil {
 		options.SkipBedrockFix = !*request.BedrockFix
@@ -150,7 +160,10 @@ func (s *Server) Open(ctx context.Context, request OpenOptions) (Info, error) {
 	defer s.mu.Unlock()
 	s.revision++
 	info := Info{
-		Info:               source.Input.Info,
+		Info:          source.Info,
+		TextureName:   source.TextureName,
+		SCTexturePath: source.SCTexturePath,
+		SCModPaths:    source.SCModPaths, SCModNames: source.SCModNames, SCModBlocks: source.SCModBlocks,
 		ID:                 s.revision,
 		Loaded:             true,
 		MinY:               -64,
@@ -239,7 +252,7 @@ func (s *Server) Handler(web fs.FS) http.Handler {
 	mux.HandleFunc("GET /api/world", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, s.Info()) })
 	mux.HandleFunc("POST /api/world/open", func(w http.ResponseWriter, r *http.Request) {
 		var request OpenOptions
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&request); err != nil {
 			http.Error(w, err.Error(), 400)
 			return
 		}
@@ -272,12 +285,41 @@ func (s *Server) Handler(web fs.FS) http.Handler {
 	})
 	mux.HandleFunc("POST /api/world/close", func(w http.ResponseWriter, r *http.Request) { s.Close(); writeJSON(w, s.Info()) })
 	mux.HandleFunc("GET /api/files", func(w http.ResponseWriter, r *http.Request) {
-		listing, err := filebrowse.List(r.URL.Query().Get("path"), r.URL.Query().Get("kind") == "pack")
+		query := r.URL.Query()
+		var listing filebrowse.Listing
+		var err error
+		if query.Get("kind") == "sc-texture" {
+			listing, err = filebrowse.ListSCTextures(query.Get("path"))
+		} else {
+			listing, err = filebrowse.List(query.Get("path"), query.Get("kind") == "pack")
+		}
 		if err != nil {
 			http.Error(w, err.Error(), 400)
 			return
 		}
 		writeJSON(w, listing)
+	})
+	mux.HandleFunc("POST /api/world/sc-texture", s.handleSCTexture)
+	mux.HandleFunc("GET /api/world/textures", func(w http.ResponseWriter, r *http.Request) {
+		id, err := strconv.ParseUint(r.URL.Query().Get("world"), 10, 64)
+		if err != nil {
+			http.Error(w, "无效的存档编号", http.StatusBadRequest)
+			return
+		}
+		s.mu.RLock()
+		current := s.current
+		s.mu.RUnlock()
+		if current.info.ID != id {
+			http.Error(w, "存档已经切换", http.StatusConflict)
+			return
+		}
+		source, ok := current.source.(*worldsource.World)
+		if !ok || source.Textures == nil {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		writeTextureSet(w, r, source.Textures)
 	})
 	mux.HandleFunc("POST /api/textures", func(w http.ResponseWriter, r *http.Request) {
 		var request struct {

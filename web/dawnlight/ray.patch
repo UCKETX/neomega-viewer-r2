@@ -1,0 +1,216 @@
+--- a/src/render/ray.frag
++++ b/src/render/ray.frag
+@@ -54,10 +54,13 @@
+ #endif
+ // 远景雾在这个距离上接近不透明，遮住观察窗口的边界。
+ uniform float uFog;
+-#if RENDER_TIER==3
+-// 每格空气的消光系数。只计算相机到首个界面之间的单次散射。
++#if RENDER_TIER>=2
++// The same atmosphere controls drive live preview and offline accumulation.
+ uniform float uAirExtinction;
+ uniform bool uCloudShadows,uSolarHaze;
++bool dawnAtmosphere(){return uSolarHaze&&uAirExtinction>0.0;}
++#endif
++#if RENDER_TIER==3
+ bool cameraInWater;
+ #endif
+ // 秒；宿主固定时间后累积同一个波面，动画时重开预览。
+@@ -151,7 +154,7 @@
+ #endif
+  return sky*uSkyLight;
+ }
+-#if RENDER_TIER==3
++#if RENDER_TIER>=2
+ // 球面薄层里从地面到层顶的距离，以层厚为单位。近地平线的光程有限。
+ // 取 2 公里的等效气溶胶层与 6371 公里的地球半径；场景的竖直轴就是当地的地表法线。
+ float aerosolDepth(float zenithCosine){
+@@ -163,8 +166,8 @@
+ // 逃逸的表面反弹和相机看见同一片天空，太阳圆盘的直射由阴影射线另算。
+ vec3 skyRadiance(vec3 d){
+  vec3 sky=baseSkyRadiance(d);
+-#if RENDER_TIER==3
+- if(uSolarHaze&&uSun.y>0.0){
++#if RENDER_TIER>=2
++ if(uSolarHaze&&uSun.y>0.0&&(uPass==1||dawnAtmosphere())){
+   // 下半球背景延续地平线光程，由场景遮住地面；在水平线关闭辉光会留下硬边。
+   float viewDepth=aerosolDepth(max(d.y,0.0)),sunDepth=aerosolDepth(uSun.y);
+   // 按层高线性分配两条光路的消光，解析积分太阳到散射点、再到观察者的透射率。
+@@ -616,7 +619,7 @@
+  entry=mix(entry,mix(vec3(1e30),vec3(-1e30),within),parallel);
+  leave=mix(leave,vec3(1e30),parallel);
+ }
+-#if RENDER_TIER==3
++#if RENDER_TIER>=2
+ // Y=0 以下密度不变，向上到 256 格线性降为零，竖直光学厚度仍等于 128 格均匀雾。
+ // 世界底部不是空气边界；只有实际海面截断薄雾，避免低机位向下看时突然露出背景色。
+ const float AIR_TOP=256.0;
+@@ -673,9 +676,9 @@
+  float last=min(far.x,min(far.y,far.z)),t=0.0,waterStart=0.0;
+  vec3 light=vec3(1);
+  ivec3 cell=ivec3(floor(eye));int side=0;uint previous=0u;bool inWater=false;
+-#if RENDER_TIER==3
++#if RENDER_TIER>=2
+  // 雾层也覆盖远景窗口以外。那里的样本朝向太阳时，射线仍可能重新进入已加载的地形。
+- if(any(lessThan(eye,vec3(0)))||any(greaterThanEqual(eye,uSize))){
++ if((uPass==1||dawnAtmosphere())&&(any(lessThan(eye,vec3(0)))||any(greaterThanEqual(eye,uSize)))){
+   vec3 entry,leave;windowInterval(entry,leave);
+   t=max(0.0,max(entry.x,max(entry.y,entry.z)));
+   if(t<last){
+@@ -879,12 +882,62 @@
+  return light*night*smoothstep(0.0,.12,d.y);
+ }
+ // 背景天空；主射线与水面反射还能看到太阳与月亮的圆盘，漫反射反弹里的阳光已由直射项计入。
+-vec3 background(vec3 d){
++#if RENDER_TIER>=2
++// Six midpoint samples through a bounded world-space layer. Clouds are only
++// drawn along rays escaping to the sky (including water reflections).
++float dawnNoise(vec2 p){
++ vec2 f=fract(p);
++ f=f*f*(3.0-2.0*f);
++ ivec2 c=ivec2(floor(p));
++ uint key=uint(c.x)*1973u+uint(c.y)*9277u+523u;
++ vec4 v=vec4(pcg(key),pcg(key+1973u),pcg(key+9277u),pcg(key+11250u))/4294967296.0;
++ return mix(mix(v.x,v.y,f.x),mix(v.z,v.w,f.x),f.y);
++}
++// The preview shadows use the cloud layer's smooth density. Limiting this
++// attenuation to surface hits prevents box-cloud strata in the air integral.
++float dawnCloudShade(vec3 p,vec3 d){
++ if(!dawnAtmosphere()||!uCloudShadows||p.y>=192.0||d.y<=.03)return 1.0;
++ vec2 q=(p.xz+d.xz*((192.0-p.y)/d.y))*.009+vec2(.22,.30);
++ float shape=.78*dawnNoise(q)+.22*dawnNoise(q*2.73+vec2(.13,2.7));
++ return 1.0-.26*smoothstep(.47,.69,shape);
++}
++vec3 dawnClouds(vec3 clearSky,vec3 p,vec3 d){
++ if(!dawnAtmosphere()||!uCloudShadows||d.y<.06||p.y>=226.0)return clearSky;
++ float enter=max(0.0,(168.0-p.y)/d.y),end=(226.0-p.y)/d.y;
++ float stepSize=min(480.0,end-enter)/6.0;
++ vec3 skyLight=baseSkyRadiance(vec3(0,.65,.75));
++ float daylight=smoothstep(-.08,.3,uSun.y);
++ vec3 sum=vec3(0);
++ float transmittance=1.0;
++ for(int i=0;i<6;i++){
++  vec3 q=p+d*(enter+(float(i)+.5)*stepSize);
++  float h=clamp((q.y-168.0)/58.0,0.0,1.0);
++  vec2 pattern=q.xz*.009+vec2(h*.51,h*.72);
++  float coarse=dawnNoise(pattern);
++  float detail=dawnNoise(pattern*2.73+vec2(.13,2.7));
++  float shape=.78*coarse+.22*detail;
++  float layer=smoothstep(0.0,.22,h)*(1.0-smoothstep(.65,1.0,h));
++  float density=smoothstep(.45,.66,shape)*layer;
++  float alpha=1.0-exp(-.063*density*stepSize);
++  float facing=pow(max(dot(d,uSun),0.0),4.0);
++  vec3 tint=skyLight*(.94+.68*h)+daylight*lightColor*(.32+.54*h+.28*facing);
++  sum+=tint*(transmittance*alpha);
++  transmittance*=1.0-alpha;
++ }
++ float visibility=smoothstep(.06,.21,d.y)*(1.0-smoothstep(1800.0,3600.0,enter));
++ return mix(clearSky, clearSky*transmittance+sum, visibility);
++}
++#endif
++vec3 background(vec3 d,vec3 origin){
+  vec3 sky=skyRadiance(d)+stars(d);
+  float toward=dot(d,uSun);
+  sky+=uDirectLight*sunlight*30.0*smoothstep(.9996,.9997,toward)*smoothstep(-.05,.02,uSun.y);
+  sky+=uDirectLight*vec3(.8,.85,1.0)*2.0*smoothstep(.9997,.9998,-toward)*smoothstep(-.02,.05,-uSun.y);
++#if RENDER_TIER>=2
++ return dawnClouds(sky,origin+uWorldOrigin,d);
++#else
+  return sky;
++#endif
+ }
+ #if RENDER_TIER>=2
+ // 反射、折射与反弹依次送回同一个遍历入口。驱动内联函数时，每份片元程序只展开一份 march 和一份阴影遍历。
+@@ -922,6 +975,10 @@
+  PathRay job=PathRay(origin,view,vec3(1),distance>0.0?distance:1e30,uOcean&&origin.y<uOceanHeight,PRIMARY);
+  vec3 color=vec3(0),seaPoint,seaView,seaGain,blockFront;
+  float fog=0.0,seaDistance=0.0;
++#if RENDER_TIER==2
++ float previewTransmission=1.0;
++ vec3 previewScatter=vec3(0);
++#endif
+ #if RENDER_TIER==3
+  // 光影档的直射强度以地面受光为基准。累积档在雾顶还原入射日光后，
+  // 表面和雾中采样点各自按真实路径衰减。参考高度固定在世界 Y=0，海面以上才计入雾层。
+@@ -979,7 +1036,35 @@
+    }
+   }
+ #else
+-  if(surfaceShadow)directFactor=sunVisibility(shadowOrigin,shadowDirection);
++  // Integrate three strata between the camera and the first visible surface.
++  // Use the real terrain shadow traversal; haze is occluded by the buildings
++  // rather than composited over the entire image. Keep one traversal callsite
++  // to avoid inlining separate copies of the expensive shader.
++  vec2 previewAir=vec2(0);
++  if(primaryRay&&dawnAtmosphere()&&uSun.y>0.0&&!job.submerged&&!uOrtho){
++   float endpoint=min(job.limit,touched?firstDepth:512.0);
++   previewAir=airInterval(origin.y,view.y,endpoint);
++  }
++  bool scatter=previewAir.y>previewAir.x;
++  if(scatter)previewTransmission=exp(-airOpticalDepth(origin.y,view.y,previewAir));
++  for(int query=surfaceShadow?0:1;query<(scatter?4:1);query++){
++   float alphaWeight=0.0;
++   if(query!=0){
++    float a=mix(previewAir.x,previewAir.y,float(query-1)/3.0);
++    float b=mix(previewAir.x,previewAir.y,float(query)/3.0);
++    alphaWeight=exp(-airOpticalDepth(origin.y,view.y,vec2(previewAir.x,a)))*
++      (1.0-exp(-airOpticalDepth(origin.y,view.y,vec2(a,b))));
++    shadowOrigin=origin+view*((a+b)*.5);
++    shadowDirection=lightDir;
++   }
++   vec3 transmittedLight=sunVisibility(shadowOrigin,shadowDirection);
++   if(query==0)directFactor=transmittedLight*dawnCloudShade(shadowOrigin+uWorldOrigin,shadowDirection);
++   else{
++    const float g=.46;
++    float phase=.25*(1.0-g*g)/pow(1.0+g*g-2.0*g*clamp(dot(view,lightDir),-1.0,1.0),1.5);
++    previewScatter+=alphaWeight*(lightColor*transmittedLight*phase+ambient*.32);
++   }
++  }
+ #endif
+   vec3 lit=radiance+directSum*directFactor;
+   if(job.kind==PRIMARY||job.kind==BOUNCE){
+@@ -991,7 +1076,7 @@
+    }
+    color+=job.gain*lit;
+    if(!sea){
+-    if(job.kind==PRIMARY){if(brightest(throughput)>.001)color+=throughput*background(view);}
++    if(job.kind==PRIMARY){if(brightest(throughput)>.001)color+=throughput*background(view,origin);}
+     else color+=job.gain*throughput*skyRadiance(job.direction);
+    }
+    if(job.kind==PRIMARY){
+@@ -1006,7 +1091,7 @@
+ #endif
+   }else{
+    if(job.kind==BLOCK_REFLECT||job.kind==SEA_EXIT||(job.kind==SEA_REFLECT&&brightest(throughput)>.001))
+-    lit+=throughput*background(job.direction);
++    lit+=throughput*background(job.direction,job.start);
+    color+=job.gain*lit;
+   }
+   // Finish the analytic interface before block-water reflection, then bounce.
+@@ -1080,6 +1165,8 @@
+  color=mix(color,baseSkyRadiance(view),fog);
+ #if RENDER_TIER==3
+  color=color*airTransmission+airRadiance;
++#elif RENDER_TIER==2
++ color=color*previewTransmission+previewScatter;
+ #endif
+  return color;
+ }
+@@ -1095,7 +1182,7 @@
+  vec3 direction=uOrtho?uForward:uForward+offset;
+  rayLength=length(direction);ray=direction/rayLength;eye=uCamera+(uOrtho?offset:vec3(0));primaryRay=true;primaryTravel=0.0;
+  touched=false;firstDepth=-1.0;firstNormal=vec3(0);
+- if(!uHasWorld&&!uOcean)return background(ray);
++ if(!uHasWorld&&!uOcean)return background(ray,eye);
+  vec3 view=ray,origin=eye;
+ #if R2_PICK
+  march(1e30,false);return vec3(0);
+@@ -1126,7 +1213,7 @@
+   deep=!underwater;
+  }
+  if(brightest(remaining)>.001)
+-  color+=remaining*(deep?waterLinear*(ambient+lightColor*max(lightDir.y,0.0))*.5:background(view));
++  color+=remaining*(deep?waterLinear*(ambient+lightColor*max(lightDir.y,0.0))*.5:background(view,origin));
+  return color;
+ #endif
+ }

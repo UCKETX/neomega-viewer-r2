@@ -3,6 +3,7 @@ package filebrowse
 
 import (
 	"neomega-converter-core/worldinput"
+	"neomega-viewer-r2/internal/survivalcraft"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -31,6 +32,31 @@ type Listing struct {
 
 // List 由 Go 处理盘符、父目录和符号链接，网页只使用返回的完整路径。
 func List(path string, packs bool) (Listing, error) {
+	return list(path, packs, false)
+}
+
+// ListSCTextures keeps Minecraft ZIPs, mods and world files out of the native
+// atlas picker. Directories are navigable but are not atlases.
+func ListSCTextures(path string) (Listing, error) {
+	return list(path, false, true)
+}
+
+func list(path string, packs, scTextures bool) (Listing, error) {
+	dirType := func(path string) string {
+		if scTextures {
+			return "folder"
+		}
+		return directoryKind(path, packs)
+	}
+	fileType := func(path string) string {
+		if scTextures {
+			if survivalcraft.IsAtlasPath(path) {
+				return "sc-texture"
+			}
+			return "unknown"
+		}
+		return fileKind(path, packs)
+	}
 	work, workErr := os.Getwd()
 	home, _ := os.UserHomeDir()
 	path = strings.Trim(strings.TrimSpace(path), "\"")
@@ -51,6 +77,9 @@ func List(path string, packs bool) (Listing, error) {
 	if stat, err := os.Stat(path); err == nil && !stat.IsDir() {
 		selected, path = path, filepath.Dir(path)
 	}
+	if scTextures && fileType(selected) != "sc-texture" {
+		selected = ""
+	}
 	entries, err := os.ReadDir(path)
 	if err != nil {
 		return Listing{}, err
@@ -62,10 +91,10 @@ func List(path string, packs bool) (Listing, error) {
 	if home != "" && home != work {
 		out.Roots = append(out.Roots, Entry{Name: "主目录", Path: home})
 	}
-	out.Kind = directoryKind(path, packs)
+	out.Kind = dirType(path)
 	if selected != "" {
 		// level.dat 的维度选项由所在的存档目录决定。
-		if kind := fileKind(selected, packs); kind != "level" {
+		if kind := fileType(selected); kind != "level" {
 			out.Kind = kind
 		}
 	}
@@ -87,9 +116,9 @@ func List(path string, packs bool) (Listing, error) {
 		}
 		value := Entry{Name: entry.Name(), Path: full, Directory: stat.IsDir()}
 		if value.Directory {
-			value.Kind = directoryKind(full, packs)
+			value.Kind = dirType(full)
 		} else {
-			value.Kind = fileKind(full, packs)
+			value.Kind = fileType(full)
 		}
 		if value.Kind == "unknown" {
 			continue
@@ -125,6 +154,12 @@ func directoryKind(path string, packs bool) string {
 // 材质包模式识别 ZIP，存档模式沿用转换器支持的文件格式。
 func fileKind(path string, packs bool) string {
 	if !packs {
+		if survivalcraft.IsPath(path) {
+			return survivalcraft.Kind
+		}
+		if strings.EqualFold(filepath.Ext(path), ".scmod") {
+			return "scmod"
+		}
 		return worldinput.FileKind(path)
 	}
 	if strings.EqualFold(filepath.Ext(path), ".zip") {

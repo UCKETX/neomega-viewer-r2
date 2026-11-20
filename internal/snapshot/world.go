@@ -66,17 +66,31 @@ func writeBlock(w io.Writer, attributes string, data []byte) error {
 }
 
 func writeWorld(ctx context.Context, w io.Writer, path, name, selected string) error {
+	return writeWorldPrepared(ctx, w, worldsource.Options{Options: worldinput.Options{Path: path, Dimension: selected}}, name, nil)
+}
+
+func writeWorldPrepared(ctx context.Context, w io.Writer, options worldsource.Options, name string, prepare func(*worldsource.World) error) error {
+	selected := options.Dimension
 	meta := manifest{Version: 1, Name: name}
 	dimensions := []string{selected}
 	for n := 0; n < len(dimensions); n++ {
-		options := worldsource.Options{Options: worldinput.Options{Path: path, Dimension: dimensions[n]}}
+		options.Dimension = dimensions[n]
 		world, err := worldsource.Open(ctx, options)
 		if err != nil {
 			return err
 		}
+		if n == 0 && prepare != nil {
+			if err := prepare(world); err != nil {
+				world.Close()
+				return err
+			}
+			if world.Textures != nil {
+				meta.Name = world.Info.Name
+			}
+		}
 		if n == 0 && selected == "" {
-			for _, dim := range world.Input.Info.Dimensions {
-				if dim != world.Input.Info.Dimension {
+			for _, dim := range world.Info.Dimensions {
+				if dim != world.Info.Dimension {
 					dimensions = append(dimensions, dim)
 				}
 			}
@@ -108,7 +122,7 @@ func writeWorld(ctx context.Context, w io.Writer, path, name, selected string) e
 }
 
 func writeDimension(ctx context.Context, w io.Writer, world *worldsource.World, key int) (dimensionInfo, error) {
-	info := dimensionInfo{ID: world.Input.Info.Dimension, Key: key}
+	info := dimensionInfo{ID: world.Info.Dimension, Key: key}
 	chunks, err := world.ScanChunks(ctx)
 	if err != nil {
 		return info, err
@@ -127,7 +141,7 @@ func writeDimension(ctx context.Context, w io.Writer, world *worldsource.World, 
 	index := r2link.ChunkIndex{}
 	var all, nearest bounds
 	best := math.Inf(1)
-	spawn := world.Input.Info.Position
+	spawn := world.Info.Position
 	for _, coord := range keys {
 		region, err := world.Region(ctx, coord[0], coord[1])
 		if err != nil {

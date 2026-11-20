@@ -44,7 +44,13 @@ func run() error {
 		return nil
 	}
 	listen := flag.String("listen", "0.0.0.0:2412", "监听地址")
-	world := flag.String("world", "", "启动时打开 Java、Bedrock、PackFS 或结构文件，留空显示 Möbius")
+	world := flag.String("world", "", "启动时打开 Java、Bedrock、生存战争 .scworld、PackFS 或结构文件，留空显示 Möbius")
+	scTexture := flag.String("survivalcraft-texture", "", "生存战争方块图集（PNG 或 PNG 格式的 .scbtex）")
+	var scMods []string
+	flag.Func("survivalcraft-mod", "生存战争 .scmod 路径（可重复，仅读取静态资源）", func(path string) error {
+		scMods = append(scMods, path)
+		return nil
+	})
 	dimension := flag.String("dimension", "", "Java 维度目录或 Bedrock 维度 0/1/2，默认主世界")
 	bedrockFix := flag.Bool("bedrock-fix", true, "修复 Bedrock 转换后的邻接属性")
 	structureMemory := flag.Int("structure-memory-mib", 512, "结构转换工作内存预算（MiB，至少 64）")
@@ -75,6 +81,8 @@ func run() error {
 	)
 	service.DesktopHost = *desktopHost
 	service.Options.SkipBedrockFix = !*bedrockFix
+	service.Options.SurvivalcraftTexture = *scTexture
+	service.Options.SurvivalcraftMods = scMods
 	service.Options.Structure = structure.Options{MemoryMiB: *structureMemory, Workers: *structureWorkers}
 	defer service.Close()
 	if *world != "" {

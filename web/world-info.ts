@@ -11,6 +11,9 @@ export function showWorldInfo(world: ViewerWorld) {
     : "未打开存档";
   element("info-path").textContent =
     world.path || world.connection?.url || "内置海晶灯莫比乌斯环；从文件夹按钮打开存档或结构文件。";
+  const mods = element("info-scmods");
+  mods.hidden = !world.scModNames?.length;
+  mods.textContent = mods.hidden ? "" : `模组：${world.scModNames?.join("、")}（${world.scModBlocks} 种方块）`;
   element<HTMLButtonElement>("close-world").disabled = !world.loaded;
   const dimension = element<HTMLSelectElement>("world-dimension");
   dimension.replaceChildren(...(world.dimensions || []).map((value) => {
@@ -20,7 +23,7 @@ export function showWorldInfo(world: ViewerWorld) {
     return option;
   }));
   dimension.value = world.dimension || "";
-  element("world-dimension-row").hidden = !world.path;
+  element("world-dimension-row").hidden = !world.path || world.kind === "scworld";
   element("height-diagnostics").hidden = true;
 }
 

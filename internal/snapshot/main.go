@@ -3,8 +3,12 @@ package snapshot
 
 import (
 	"bufio"
+	"bytes"
+	"compress/gzip"
 	"context"
 	_ "embed"
+	"encoding/base64"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -14,6 +18,8 @@ import (
 
 	"neomega-converter-core/structure"
 	"neomega-converter-core/worldinput"
+	"neomega-view-utils/r2assets"
+	"neomega-viewer-r2/internal/worldsource"
 )
 
 //go:embed template.html
@@ -34,8 +40,14 @@ func Run(ctx context.Context, args []string) error {
 	output := flags.String("o", "", "输出 HTML 路径，默认为输入旁的同名 .html")
 	custom := flags.String("template", "", "模板 HTML 路径，默认使用内嵌模板")
 	dimension := flags.String("dimension", "", "仅导出这个维度，默认导出全部非空维度")
+	scTexture := flags.String("survivalcraft-texture", "", "生存战争方块图集（PNG 或 PNG 格式的 .scbtex）")
+	var scMods []string
+	flags.Func("survivalcraft-mod", "生存战争 .scmod 路径（可重复，仅读取静态资源）", func(path string) error {
+		scMods = append(scMods, path)
+		return nil
+	})
 	flags.Usage = func() {
-		fmt.Fprintln(flags.Output(), "用法：viewer export [选项] <存档目录、PackFS 或结构文件>")
+		fmt.Fprintln(flags.Output(), "用法：viewer export [选项] <存档目录、.scworld、PackFS 或结构文件>")
 		flags.PrintDefaults()
 	}
 	if err := flags.Parse(args); err != nil {
@@ -101,13 +113,22 @@ func Run(ctx context.Context, args []string) error {
 	defer os.Remove(file.Name())
 	defer file.Close()
 	writer := bufio.NewWriter(file)
-	if _, err := io.WriteString(writer, strings.Replace(before, viewerMarker, player, 1)); err != nil {
+	pagePlayer := player
+	options := worldsource.Options{Options: worldinput.Options{Path: source, Dimension: *dimension}, SurvivalcraftTexture: *scTexture, SurvivalcraftMods: scMods}
+	if err := writeWorldPrepared(ctx, writer, options, name, func(world *worldsource.World) error {
+		if world.Textures != nil && strings.Contains(page, viewerMarker) {
+			var err error
+			pagePlayer, err = withNativeTextures(pagePlayer, world.Textures)
+			if err != nil {
+				return err
+			}
+		}
+		_, err := io.WriteString(writer, strings.Replace(before, viewerMarker, pagePlayer, 1))
+		return err
+	}); err != nil {
 		return err
 	}
-	if err := writeWorld(ctx, writer, source, name, *dimension); err != nil {
-		return err
-	}
-	if _, err := io.WriteString(writer, strings.Replace(after, viewerMarker, player, 1)); err != nil {
+	if _, err := io.WriteString(writer, strings.Replace(after, viewerMarker, pagePlayer, 1)); err != nil {
 		return err
 	}
 	if err := writer.Flush(); err != nil {
@@ -124,4 +145,39 @@ func Run(ctx context.Context, args []string) error {
 	}
 	fmt.Println(*output)
 	return nil
+}
+
+// Replace only resources provided by the Survivalcraft snapshot; preserve
+// the embedded shaders and worker from the official offline player.
+func withNativeTextures(page string, textures *r2assets.TextureSet) (string, error) {
+	const marker = `<script type="application/json" id="r2-resources">`
+	before, tail, ok := strings.Cut(page, marker)
+	if !ok {
+		return "", fmt.Errorf("离线播放器缺少资源表")
+	}
+	body, after, ok := strings.Cut(tail, "</script>")
+	if !ok {
+		return "", fmt.Errorf("离线播放器资源表不完整")
+	}
+	var resources map[string]string
+	if err := json.Unmarshal([]byte(body), &resources); err != nil {
+		return "", err
+	}
+	var zipped bytes.Buffer
+	for name, data := range textures.Files {
+		zipped.Reset()
+		z := gzip.NewWriter(&zipped)
+		if _, err := z.Write(data); err != nil {
+			return "", err
+		}
+		if err := z.Close(); err != nil {
+			return "", err
+		}
+		resources[name] = base64.StdEncoding.EncodeToString(zipped.Bytes())
+	}
+	encoded, err := json.Marshal(resources)
+	if err != nil {
+		return "", err
+	}
+	return before + marker + string(encoded) + "</script>" + after, nil
 }

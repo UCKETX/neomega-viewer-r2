@@ -6,6 +6,7 @@ export interface OpenOptions {
   structureMemoryMiB?: number;
   structureWorkers?: number;
   structureRoot?: string;
+  survivalcraftMods?: string[];
 }
 
 export interface Connection {
@@ -20,6 +21,11 @@ export interface ViewerWorld extends OpenOptions {
   name: string;
   position: number[];
   kind?: string;
+  textureName?: string;
+  scTexturePath?: string;
+  scTextureUpdate?: boolean;
+  scModNames?: string[];
+  scModBlocks?: number;
   path?: string;
   dimensions?: string[];
   scene?: { ocean: number; camera: R2LinkCamera; time: number };

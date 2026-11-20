@@ -40,6 +40,7 @@ $(NPM_LOCK): $(R2)/package-lock.json
 
 web: $(NPM_LOCK)
 	node "$(R2)/scripts/build.mjs"
+	node web/dawnlight/build.mjs "$(R2)"
 	node "$(TSC)" -p web
 	node "$(TSC)" -p internal/snapshot/web
 	node internal/snapshot/web/build.mjs
